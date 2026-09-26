@@ -12,7 +12,49 @@ from google.adk.agents import llm_agent
 from google.adk import runners
 from google.adk.plugins import base_plugin
 
+from core.config import DEMO_SECRETS
 from core.utils import chat_with_agent
+
+
+def _secret_pattern(needle: str) -> str:
+    """Regex for a secret even when spelled out with separators
+    (``a-d-m-i-n-1-2-3``, ``db . vinbank . internal``)."""
+    chars = [c for c in needle if c.isalnum()]
+    return r"[\W_]{0,3}".join(re.escape(c) for c in chars) + r"(?::\d{2,5})?"
+
+
+# Known demo secrets → one alternation, longest first.
+_SECRET_NEEDLES = sorted(
+    {"".join(c for c in s if c.isalnum()).lower() for s in DEMO_SECRETS if s},
+    key=len,
+    reverse=True,
+)
+SECRET_VALUE_PATTERN = (
+    "|".join(_secret_pattern(s) for s in _SECRET_NEEDLES) or r"(?!x)x"
+)
+
+# Public contacts from the lab ground truth — allowed in replies.
+PUBLIC_CONTACTS = {"support@vinbank.example"}
+
+# Standalone number: not part of a longer number or a decimal like 1.234 / 500,000.
+_NUM_START = r"(?<!\d)(?<!\d[.,])"
+_NUM_END = r"(?!\d)(?![.,]\d)"
+# "password is X" → only X is redacted (trailing punctuation kept).
+_VALUE = r"(?P<value>\S+?)(?=[,;.]?(?:\s|$))"
+
+# Order matters: secrets first, then longer numbers (CCCD) before phones.
+PII_PATTERNS = {
+    "secret": SECRET_VALUE_PATTERN,
+    "internal_host": r"\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|corp)(?::\d{2,5})?\b",
+    "api_key": r"\bsk-[A-Za-z0-9_-]{6,}|\bapi[\s_-]?key\s*(?:is|:|=)\s*" + _VALUE,
+    "password": r"\b(?:password|passwd|pwd|mật khẩu|mat khau)\s*(?:is|là|la|:|=)\s*" + _VALUE,
+    "email": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}",
+    "national_id": _NUM_START + r"(?:\d{12}|\d{9})" + _NUM_END + r"(?!\s*(?:vnd|vnđ|đ|dong|usd|%))",
+    "phone": _NUM_START + r"(?:\+84|0)\d{9,10}" + _NUM_END,
+}
+
+# Issues that mean internal data leaked → block the whole reply, not just redact.
+SECRET_ISSUES = {"secret", "internal_host", "api_key", "password"}
 
 
 # ============================================================
@@ -37,25 +79,29 @@ def content_filter(response: str) -> dict:
         dict with 'safe', 'issues', and 'redacted' keys
     """
     issues = []
-    redacted = response
-
-    # PII patterns to check
-    PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
-    }
+    issue_types = []
+    redacted = response or ""
 
     for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, response, re.IGNORECASE)
-        if matches:
-            issues.append(f"{name}: {len(matches)} found")
-            redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+        count = 0
+
+        def _redact(m: re.Match) -> str:
+            nonlocal count
+            if m.group(0).lower() in PUBLIC_CONTACTS:
+                return m.group(0)
+            count += 1
+            if m.groupdict().get("value") is not None:
+                return m.group(0)[: m.start("value") - m.start()] + "[REDACTED]"
+            return "[REDACTED]"
+
+        # Scan the progressively redacted text so one value is counted once.
+        redacted = re.sub(pattern, _redact, redacted, flags=re.IGNORECASE)
+        if count:
+            issues.append(f"{name}: {count} found")
+            issue_types.append(name)
 
     return {
+        "issue_types": issue_types,
         "safe": len(issues) == 0,
         "issues": issues,
         "redacted": redacted,
@@ -140,6 +186,12 @@ async def llm_safety_check(response_text: str) -> dict:
 #   - Return the (possibly modified) llm_response, or None to keep original
 # ============================================================
 
+BLOCKED_OUTPUT_MESSAGE = (
+    "I'm sorry, I can't share internal system information. "
+    "I'm happy to help with your VinBank accounts, transfers, savings or loans."
+)
+
+
 class OutputGuardrailPlugin(base_plugin.BasePlugin):
     """Plugin that checks agent output before sending to user."""
 
@@ -172,16 +224,30 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        result = content_filter(response_text)
+        if not result["safe"]:
+            if SECRET_ISSUES.intersection(result["issue_types"]):
+                # Internal data leaked: redaction would still confirm the secret exists.
+                self.blocked_count += 1
+                self._replace(llm_response, BLOCKED_OUTPUT_MESSAGE)
+                return llm_response
+            self.redacted_count += 1
+            self._replace(llm_response, result["redacted"])
+            response_text = result["redacted"]
 
-        return llm_response  # TODO: modify if needed
+        if self.use_llm_judge:
+            verdict = await llm_safety_check(response_text)
+            if not verdict["safe"]:
+                self.blocked_count += 1
+                self._replace(llm_response, BLOCKED_OUTPUT_MESSAGE)
+
+        return llm_response
+
+    @staticmethod
+    def _replace(llm_response, text: str) -> None:
+        llm_response.content = types.Content(
+            role="model", parts=[types.Part.from_text(text=text)]
+        )
 
 
 # ============================================================
