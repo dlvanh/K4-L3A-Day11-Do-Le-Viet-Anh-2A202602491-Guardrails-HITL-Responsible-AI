@@ -10,7 +10,7 @@
 
 | | |
 |---|---|
-| **Họ tên** | Do Le Viet Anh |
+| **Họ tên** |Đỗ Lê Việt Anh |
 | **MSSV** | 2A202602491 |
 | **Red provider** | `openai` / `gpt-4o-mini` |
 
