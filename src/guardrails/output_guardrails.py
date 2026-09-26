@@ -39,8 +39,9 @@ PUBLIC_CONTACTS = {"support@vinbank.example"}
 # Standalone number: not part of a longer number or a decimal like 1.234 / 500,000.
 _NUM_START = r"(?<!\d)(?<!\d[.,])"
 _NUM_END = r"(?!\d)(?![.,]\d)"
-# "password is X" → only X is redacted (trailing punctuation kept).
-_VALUE = r"(?P<value>\S+?)(?=[,;.]?(?:\s|$))"
+# "password is X" → only X is redacted (trailing punctuation kept). X must look
+# like a credential (has a digit/symbol) so "password is case-sensitive" passes.
+_VALUE = r"(?P<value>\[REDACTED\]|(?=[^\s,;]*[\d!@#$%^&*])\S+?)(?=[,;.]?(?:\s|$))"
 
 # Order matters: secrets first, then longer numbers (CCCD) before phones.
 PII_PATTERNS = {
