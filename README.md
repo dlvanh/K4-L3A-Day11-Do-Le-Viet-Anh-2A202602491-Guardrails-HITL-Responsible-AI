@@ -6,6 +6,28 @@
 
 ---
 
+## Bài nộp
+
+| | |
+|---|---|
+| **Họ tên** | Do Le Viet Anh |
+| **MSSV** | 2A202602491 |
+| **Red provider** | `openai` / `gpt-4o-mini` |
+
+**Cách chạy** (từ gốc repo, sau khi kích hoạt `.venv` và điền `.env`):
+
+```bash
+python src/main.py --part 2   # CP2 — guardrails (in terminal)
+python src/main.py --part 3   # CP3 — outputs/results.json, audit_log.json, metrics.json
+python src/main.py --part 4   # CP4 — outputs/attack_results.json (+ unsafe/guards)
+pytest tests/smoke -q && pytest tests/public -q
+python scripts/grade.py --submission-dir . --out outputs/grade_report.json
+```
+
+**Ghi chú về model Blue:** OpenRouter trả `404 No endpoints found` cho `liquid/lfm-2.5-2.6b`; model này hiện chỉ có dạng `liquid/lfm-2.5-2.6b:free` (cùng model), nên `BLUE_MODEL` trong `src/core/config.py` dùng id đó. Khi chạy CP3, quota free-tier của OpenRouter (50 request/ngày) đã hết, nên các câu trả lời của Blue trong `outputs/results.json` là lỗi 429; các quyết định chặn/cho qua của guardrails (rate limit, input, output, egress) vẫn là kết quả thật.
+
+---
+
 ## Thời lượng
 
 | Phần | Thời gian |
